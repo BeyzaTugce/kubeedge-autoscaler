@@ -15,8 +15,9 @@ class AutoScaler:
     """
 
     YOLOv5_IMAGE = "byz96/kubeedge-yolov5:v4"
+    MOBILENET_IMAGE = "byz96/serverless-mobilenet:v1"
     SQUEEZENET_IMAGE = "byz96/serverless-squeezenet:v1"
-    NGINX_IMAGE = "nginx:1.14.2"
+    SHUFFLENET_IMAGE = "byz96/serverless-shufflenet:v1"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -42,14 +43,18 @@ class AutoScaler:
             self.image = self.YOLOv5_IMAGE
             self.port = 5000
             self.name = "-".join(("yolov5-deployment", node))
+        elif app == "mobilenet":
+            self.image = self.MOBILENET_IMAGE
+            self.port = 8080
+            self.name = "-".join(("mobilenet-deployment", node))
         elif app == "squeezenet":
             self.image = self.SQUEEZENET_IMAGE
             self.port = 8080
             self.name = "-".join(("squeezenet-deployment", node))
-        elif app == "nginx":
-            self.image = self.NGINX_IMAGE
-            self.port = 80
-            self.name = "-".join(("nginx-deployment", node))
+        elif app == "shufflenet":
+            self.image = self.SHUFFLENET_IMAGE
+            self.port = 8080
+            self.name = "-".join(("shufflenet-deployment", node))
 
     ################## CRUD Operations for the given deployment object ##################
 
@@ -154,13 +159,16 @@ class AutoScaler:
                 label_selector=label
             )
             pod_list = self.core_v1.list_namespaced_pod(namespace="default")
-            print("pods: ", pod_list)
+
             logging.info("Deployment %s has been successfully read.", self.name)
         except client.ApiException as exc:
             if exc.status == 404:
                 return None
             logging.error("Error while reading deployment %s", self.name)
             raise exc
+
+        for pod in pod_list.items:
+            print("%s\t%s\t%s" % (pod.metadata.name, pod.status.phase, pod.status.pod_ip))
 
         pods = []
         for pod in resource["items"]:
