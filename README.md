@@ -6,6 +6,9 @@ This project includes functions for watching and scaling the pods deployed to an
 - auto_scaler.py
 |     This code is to create an auto scaler for specified edge node and application type.
 |
+- metric_collector.py
+|     This code is to collect metrics for specified edge node and application type.
+|
 - run_auto_scaler.py
 |     This file is to run the auto scalers for each node and watch them
 |

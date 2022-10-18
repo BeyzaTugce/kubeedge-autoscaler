@@ -15,9 +15,9 @@ class AutoScaler:
     """
 
     YOLOv5_IMAGE = "byz96/kubeedge-yolov5:v4"
-    MOBILENET_IMAGE = "byz96/serverless-mobilenet:v1"
-    SQUEEZENET_IMAGE = "byz96/serverless-squeezenet:v1"
-    SHUFFLENET_IMAGE = "byz96/serverless-shufflenet:v1"
+    MOBILENET_IMAGE = "byz96/serverless-mobilenet:v3"
+    SQUEEZENET_IMAGE = "byz96/serverless-squeezenet:v3"
+    SHUFFLENET_IMAGE = "byz96/serverless-shufflenet:v3"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -35,30 +35,73 @@ class AutoScaler:
         self.core_v1 = client.CoreV1Api()
         self.apps_v1 = client.AppsV1Api()
 
+        self.pod_ips = {}
         self.node = node
         self.app = "-".join((app, node))
-        self.scale = 0
 
         if app == "yolov5":
             self.image = self.YOLOv5_IMAGE
             self.port = 5000
+            self.nodeport = 30000 + int(node[-1])
             self.name = "-".join(("yolov5-deployment", node))
+            self.service = "-".join(("yolov5-lb", node))
         elif app == "mobilenet":
             self.image = self.MOBILENET_IMAGE
             self.port = 8080
+            self.nodeport = 30100 + int(node[-1])
             self.name = "-".join(("mobilenet-deployment", node))
+            self.service = "-".join(("mobilenet-lb", node))
         elif app == "squeezenet":
             self.image = self.SQUEEZENET_IMAGE
             self.port = 8080
+            self.nodeport = 30200 + int(node[-1])
             self.name = "-".join(("squeezenet-deployment", node))
+            self.service = "-".join(("squeezenet-lb", node))
         elif app == "shufflenet":
             self.image = self.SHUFFLENET_IMAGE
             self.port = 8080
+            self.nodeport = 30300 + int(node[-1])
             self.name = "-".join(("shufflenet-deployment", node))
+            self.service = "-".join(("shufflenet-lb", node))
+        self.scale = self.__set_scale()
+
+    def watch_and_scale(self):
+        """
+        Watch the pods and scale up or down according to available resources
+        """
+        cpu_total = 0
+        pod_list = self.__read_deployment()
+        for pod in pod_list:
+            cpu_total = cpu_total + pod["cpu"]
+
+        if len(pod_list) == 0:
+            self.__create_deployment_and_service(1)
+        elif cpu_total < 100000:
+            self.__update_deployment(self.scale + 1)
+        elif cpu_total > 500000 and self.scale > 1:
+            self.__update_deployment(self.scale - 1)
+        elif cpu_total > 500000 and self.scale == 1:
+            self.__delete_deployment()
+    
+    def __set_scale(self):
+        """
+        Get the replica number of deployment if it exists.
+        """
+        try:
+            resource = self.apps_v1.read_namespaced_deployment_scale(
+                name=self.name,
+                namespace="default"
+            )
+            logging.info("Replica number of deployment %s has been successfully read.", self.name)
+        except client.ApiException as exc:
+            if exc.status == 404:
+                return 0
+            logging.error("Error while reading replica number of deployment %s", self.name)
+            raise exc
+        return int(resource.spec.replicas)
 
     ################## CRUD Operations for the given deployment object ##################
-
-    def create_deployment_object(self, replica):
+    def __create_deployment_object(self, replica):
         """
         Configure the deployment specifications.
         """
@@ -69,16 +112,6 @@ class AutoScaler:
             image=self.image,
             image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(name="http", container_port=self.port)],
-            #resources=client.V1ResourceRequirements(
-            #    requests={
-            #        "cpu": "100m",
-            #        "memory": "200Mi"
-            #    },
-            #    limits={
-            #        "cpu": "500m",
-            #        "memory": "500Mi"
-            #    },
-            #),
         )
         # Create and configure a spec section
         template = client.V1PodTemplateSpec(
@@ -114,13 +147,38 @@ class AutoScaler:
         )
         return deployment
 
-    def create_deployment(self, replica):
+    def __create_service_object(self):
+        """
+        Create the service with the given specifications.
+        """
+
+        service = client.V1Service(
+            api_version="v1",
+            kind="Service",
+            metadata=client.V1ObjectMeta(
+                name=self.service
+            ),
+            spec=client.V1ServiceSpec(
+                selector={
+                    "app": self.app
+                },
+                type="NodePort",
+                ports=[client.V1ServicePort(
+                    port=self.port,
+                    target_port=self.port,
+                    node_port=self.nodeport
+                )]
+            )
+        )
+        return service
+
+    def __create_deployment_and_service(self, replica=1):
         """
         Create the deployment with the given specifications.
         """
         # Create deployment object
         try:
-            deployment = self.create_deployment_object(replica)
+            deployment = self.__create_deployment_object(replica)
             logging.info(
                 "Deployment object %s has been successfully created.", self.name
             )
@@ -130,7 +188,7 @@ class AutoScaler:
                 %s with the given specifications", self.name
             )
             raise exc
-        # Create deployement
+        # Create deployment
         try:
             self.apps_v1.create_namespaced_deployment(
                 body=deployment, namespace="default"
@@ -144,11 +202,37 @@ class AutoScaler:
                 "Error while creating namaspaced deployment %s", self.name
             )
             raise exc
+        # Create service object
+        try:
+            service = self.__create_service_object()
+            logging.info(
+                "Service object %s has been successfully created.", self.service
+            )
+        except Exception as exc:
+            logging.error(
+                "Error while creating service object \
+                %s with the given specifications", self.service
+            )
+            raise exc
+        # Create service
+        try:
+            self.core_v1.create_namespaced_service(namespace="default", body=service)
+            logging.info(
+                "Namespaced service %s has been successfully created.", self.name
+            )
+        except Exception as exc:
+            logging.error(
+                "Error while creating namaspaced service %s", self.name
+            )
+            raise exc
 
-    def read_deployment(self):
+    def __read_deployment(self):
         """
         Read the resource usage (CPU, Memory etc.) of deployment.
         """
+        if self.scale == 0:
+            logging.info("Deployment object %s does not exist.", self.name)
+            return
         label = f"app={self.app}"
         try:
             resource = self.api.list_namespaced_custom_object(
@@ -158,17 +242,12 @@ class AutoScaler:
                 plural="pods",
                 label_selector=label
             )
-            pod_list = self.core_v1.list_namespaced_pod(namespace="default")
-
             logging.info("Deployment %s has been successfully read.", self.name)
         except client.ApiException as exc:
             if exc.status == 404:
                 return None
             logging.error("Error while reading deployment %s", self.name)
             raise exc
-
-        for pod in pod_list.items:
-            print("%s\t%s\t%s" % (pod.metadata.name, pod.status.phase, pod.status.pod_ip))
 
         pods = []
         for pod in resource["items"]:
@@ -187,7 +266,7 @@ class AutoScaler:
 
         return pods
 
-    def update_deployment(self, replica):
+    def __update_deployment(self, replica):
         """
         Scale the deployment with a given number of replicas in the given namespace.
         """
@@ -217,7 +296,7 @@ class AutoScaler:
 
         self.scale = replica
 
-    def delete_deployment(self):
+    def __delete_deployment(self):
         """
         Delete the deployment.
         """
@@ -241,25 +320,6 @@ class AutoScaler:
             raise exc
 
     ######################## END ########################
-
-    def watch_and_scale(self, pod_list: list):
-        """
-        Watch the pods and scale up or down according to available resources
-        """
-        cpu_total = 0
-
-        for pod in pod_list:
-            cpu_total = cpu_total + pod["cpu"]
-
-        if len(pod_list) == 0:
-            self.create_deployment(1)
-        elif cpu_total < 100000:
-            self.update_deployment(self.scale + 1)
-        elif cpu_total > 500000 and self.scale > 1:
-            self.update_deployment(self.scale - 1)
-        elif cpu_total > 500000 and self.scale == 1:
-            self.delete_deployment()
-
 
     def find_least_congested_pod(self, pod_list):
         """
