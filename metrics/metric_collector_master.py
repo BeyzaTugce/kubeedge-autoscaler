@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 
 from flask import Flask, Response, request
 from kubernetes import client, config
@@ -8,18 +9,29 @@ from kubernetes import client, config
 # Initialize the Flask application
 app = Flask(__name__)
 
+logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler("debug.log"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
 config.load_kube_config()
 api = client.CustomObjectsApi()
 core_v1 = client.CoreV1Api()
 pod_ips = {}
 
-def find_pod_ips():
+def find_ready_pod_ips(label):
     """
     Create the dictionary mapping pod names to their IPs
     """
     try:
-        pod_list = core_v1.list_namespaced_pod(namespace="default")
+        pod_list = core_v1.list_namespaced_pod(namespace="default", label_selector=label)
         for pod in pod_list.items:
+            if pod.status.phase != "Running":
+                continue
             pod_ips[pod.metadata.name] = pod.status.pod_ip
         logging.info("Pod IPs have been successfully read.")
     except client.ApiException as exc:
@@ -56,10 +68,9 @@ def collect_metrics():
     elif app_type == "shufflenet":
         port = 8080
         name = "-".join(("shufflenet-deployment", node))
-
-    find_pod_ips()
     
     label = f"app={app_type}-{node}"
+    find_ready_pod_ips(label)
     try:
         resource = api.list_namespaced_custom_object(
             group="metrics.k8s.io",
@@ -75,15 +86,16 @@ def collect_metrics():
         logging.error("Error while reading deployment %s", name)
         raise exc
 
-    request_count = 0
-    available_cpu = 0 
-    available_mem = 0
-    avg_response_time = 0
     pod_num = len(resource["items"])
+    pod_instances = {}
     
     for pod in resource["items"]:
         pod_name = pod['metadata']['name']
         pod_ip = pod_ips[pod_name]
+        request_count = 0
+        available_cpu = 0 
+        available_mem = 0
+        avg_response_time = 0
         response_times = []
 
         with os.popen(f"kubectl exec -it {pod_name} -- curl {pod_ip}:{port}/metrics") as f:
@@ -95,16 +107,21 @@ def collect_metrics():
                 avg_response_time = float(metrics[48].split()[-1])
 
                 num_of_req = request_count if request_count < 10 else 10
-                for i in range(num_of_req):
+                for i in range(int(num_of_req)):
                     response_times.append(float(metrics[51+(i*3)].split()[-1]))
+        
+        pod_info = {
+            "req_count": request_count, 
+            "available_cpu_percentage": available_cpu, 
+            "available_mem_percentage": available_mem,
+            "avg_response_time": avg_response_time,
+            "response_times": response_times,
+        }
+        pod_instances[pod_name] = pod_info
 
     res = json.dumps({
-        "req_count": request_count,
-        "pod_number": pod_num, 
-        "available_cpu_percentage": available_cpu / pod_num, 
-        "available_mem_percentage": available_mem / pod_num,
-        "avg_response_time": avg_response_time / pod_num,
-        "response_times": response_times
+        "pod_number": pod_num,
+        "pod_instances": pod_instances
     })
     return Response(response=res, status=200)
 

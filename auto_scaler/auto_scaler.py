@@ -2,9 +2,11 @@
 This script runs the auto-scaler for kubernetes cluster
 where some applications deployed to each edge node
 """
+import json
 import logging
 import sys
 
+import requests
 from kubernetes import client, config
 
 
@@ -69,19 +71,26 @@ class AutoScaler:
         """
         Watch the pods and scale up or down according to available resources
         """
-        cpu_total = 0
-        pod_list = self.__read_deployment()
-        for pod in pod_list:
-            cpu_total = cpu_total + pod["cpu"]
+        req = json.dumps({"node": self.node, "app": self.app})
+        response = requests.post("http://138.246.236.8:8180/metrics", data=req)
+        metrics = json.loads(response.text)
 
-        if len(pod_list) == 0:
-            self.__create_deployment_and_service(1)
-        elif cpu_total < 100000:
-            self.__update_deployment(self.scale + 1)
-        elif cpu_total > 500000 and self.scale > 1:
-            self.__update_deployment(self.scale - 1)
-        elif cpu_total > 500000 and self.scale == 1:
-            self.__delete_deployment()
+        pod_num = metrics["pod_number"]
+        cpu = metrics["available_cpu_percentage"]
+        mem = metrics["available_mem_percentage"]
+
+        #pod_list = self.__read_deployment()
+        #for pod in pod_list:
+        #    cpu_total = cpu_total + pod["cpu"]
+
+        if pod_num == 0:
+            self.create_deployment_and_service(1)
+        elif 0 < cpu < 60:
+            self.update_deployment(self.scale + 1)
+        elif cpu > 94 and self.scale > 1:
+            self.update_deployment(self.scale - 1)
+        elif cpu > 94 and self.scale == 1:
+            self.delete_deployment()
     
     def __set_scale(self):
         """
@@ -101,7 +110,7 @@ class AutoScaler:
         return int(resource.spec.replicas)
 
     ################## CRUD Operations for the given deployment object ##################
-    def __create_deployment_object(self, replica):
+    def create_deployment_object(self, replica):
         """
         Configure the deployment specifications.
         """
@@ -147,7 +156,7 @@ class AutoScaler:
         )
         return deployment
 
-    def __create_service_object(self):
+    def create_service_object(self):
         """
         Create the service with the given specifications.
         """
@@ -162,7 +171,7 @@ class AutoScaler:
                 selector={
                     "app": self.app
                 },
-                type="NodePort",
+                type="LoadBalancer",
                 ports=[client.V1ServicePort(
                     port=self.port,
                     target_port=self.port,
@@ -172,13 +181,13 @@ class AutoScaler:
         )
         return service
 
-    def __create_deployment_and_service(self, replica=1):
+    def create_deployment_and_service(self, replica=1):
         """
         Create the deployment with the given specifications.
         """
         # Create deployment object
         try:
-            deployment = self.__create_deployment_object(replica)
+            deployment = self.create_deployment_object(replica)
             logging.info(
                 "Deployment object %s has been successfully created.", self.name
             )
@@ -204,7 +213,7 @@ class AutoScaler:
             raise exc
         # Create service object
         try:
-            service = self.__create_service_object()
+            service = self.create_service_object()
             logging.info(
                 "Service object %s has been successfully created.", self.service
             )
@@ -226,7 +235,7 @@ class AutoScaler:
             )
             raise exc
 
-    def __read_deployment(self):
+    def read_deployment(self):
         """
         Read the resource usage (CPU, Memory etc.) of deployment.
         """
@@ -266,7 +275,7 @@ class AutoScaler:
 
         return pods
 
-    def __update_deployment(self, replica):
+    def update_deployment(self, replica):
         """
         Scale the deployment with a given number of replicas in the given namespace.
         """
@@ -282,6 +291,7 @@ class AutoScaler:
             raise exc
 
         # Update container image
+        up_down = "up" if self.scale < replica else "down"
         deployment.spec.replicas = replica
 
         # patch the deployment
@@ -289,14 +299,14 @@ class AutoScaler:
             self.apps_v1.patch_namespaced_deployment(
                 name=self.name, namespace="default", body=deployment
             )
-            logging.info("Deployment object %s has been successfully scaled.", self.name)
+            logging.info("Deployment object %s has been successfully scaled %s.", self.name, up_down)
         except Exception as exc:
             logging.error("Error while scaling deployment %s", self.name)
             raise exc
 
         self.scale = replica
 
-    def __delete_deployment(self):
+    def delete_deployment(self):
         """
         Delete the deployment.
         """
@@ -315,8 +325,17 @@ class AutoScaler:
                 ),
             )
             logging.info("Deployment object %s has been successfully deleted.", self.name)
+            self.core_v1.delete_namespaced_service(
+                name=self.service,
+                namespace="default",
+                body=client.V1DeleteOptions(
+                    propagation_policy="Foreground",
+                    grace_period_seconds=3
+                ),
+            )
+            logging.info("Service object %s has been successfully deleted.", self.service)
         except Exception as exc:
-            logging.error("Error while deleting deployment %s", self.name)
+            logging.error("Error while deleting deployment %s and service %s", self.name, self.service)
             raise exc
 
     ######################## END ########################
