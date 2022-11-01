@@ -17,7 +17,7 @@ logging.basicConfig(
             logging.StreamHandler(sys.stdout)
         ]
     )
-    
+
 config.load_kube_config()
 api = client.CustomObjectsApi()
 core_v1 = client.CoreV1Api()
@@ -97,13 +97,15 @@ def collect_metrics():
         pod_ip = pod_ips[pod_name]
         request_count = 0
         avg_response_time = 0
+        request_density = 0
         response_times = []
 
         with os.popen(f"kubectl exec -it {pod_name} -- curl {pod_ip}:{port}/metrics") as f:
             metrics = f.readlines()
-            if len(metrics) > 62:
+            if len(metrics) > 64:
                 request_count += float(metrics[38].split()[-1])
                 avg_response_time += float(metrics[48].split()[-1])
+                request_density = float(metrics[-1].split()[-1])
 
                 num_of_req = request_count if request_count < 10 else 10
                 for i in range(int(num_of_req)):
@@ -111,6 +113,7 @@ def collect_metrics():
             
         pod_info = {
             "req_count": request_count, 
+            "request_density": request_density,
             "avg_response_time": avg_response_time,
             "response_times": response_times,
         }

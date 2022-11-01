@@ -71,6 +71,7 @@ def collect_metrics():
     
     label = f"app={app_type}-{node}"
     find_ready_pod_ips(label)
+
     try:
         resource = api.list_namespaced_custom_object(
             group="metrics.k8s.io",
@@ -96,22 +97,25 @@ def collect_metrics():
         available_cpu = 0 
         available_mem = 0
         avg_response_time = 0
+        request_density = 0
         response_times = []
 
         with os.popen(f"kubectl exec -it {pod_name} -- curl {pod_ip}:{port}/metrics") as f:
             metrics = f.readlines()
-            if len(metrics) > 62:
+            if len(metrics) > 64:
                 request_count = float(metrics[38].split()[-1])
                 available_cpu = float(metrics[44].split()[-1])
                 available_mem = float(metrics[45].split()[-1])
                 avg_response_time = float(metrics[48].split()[-1])
+                request_density = float(metrics[-1].split()[-1])
 
                 num_of_req = request_count if request_count < 10 else 10
                 for i in range(int(num_of_req)):
                     response_times.append(float(metrics[51+(i*3)].split()[-1]))
         
         pod_info = {
-            "req_count": request_count, 
+            "req_count": request_count,
+            "request_density": request_density, 
             "available_cpu_percentage": available_cpu, 
             "available_mem_percentage": available_mem,
             "avg_response_time": avg_response_time,
