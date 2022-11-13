@@ -42,6 +42,7 @@ def find_service_ports(hostname):
     services["mobilenet"] = 30100 + node_number
     services["squeezenet"] = 30200 + node_number
     services["shufflenet"] = 30300 + node_number
+    services["binaryalert"] = 30400 + node_number
 
 @app.route("/proxy", methods=["POST"])
 def forward_request():

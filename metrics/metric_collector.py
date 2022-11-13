@@ -17,7 +17,7 @@ logging.basicConfig(
             logging.StreamHandler(sys.stdout)
         ]
     )
-
+    
 config.load_kube_config()
 api = client.CustomObjectsApi()
 core_v1 = client.CoreV1Api()
@@ -68,9 +68,13 @@ def collect_metrics():
     elif app_type == "shufflenet":
         port = 8080
         name = "-".join(("shufflenet-deployment", node))
-
+    elif app_type == "binaryalert":
+        port = 8080
+        name = "-".join(("binaryalert-deployment", node))
+    
     label = f"app={app_type}-{node}"
     find_ready_pod_ips(label)
+
     try:
         resource = api.list_namespaced_custom_object(
             group="metrics.k8s.io",
@@ -86,36 +90,33 @@ def collect_metrics():
         logging.error("Error while reading deployment %s", name)
         raise exc
 
-    request_count = 0
-    avg_response_time = 0
     pod_num = len(resource["items"])
-
     pod_instances = {}
-    
+
     for pod in resource["items"]:
         pod_name = pod['metadata']['name']
         pod_ip = pod_ips[pod_name]
         request_count = 0
-        avg_response_time = 0
+        response_time = 0
+        p50_res_time = 0
+        p90_res_time = 0
         request_density = 0
-        response_times = []
 
         with os.popen(f"kubectl exec -it {pod_name} -- curl {pod_ip}:{port}/metrics") as f:
             metrics = f.readlines()
-            if len(metrics) > 64:
-                request_count += float(metrics[38].split()[-1])
-                avg_response_time += float(metrics[48].split()[-1])
-                request_density = float(metrics[-1].split()[-1])
+            if len(metrics) > 49:
+                request_count = float(metrics[38].split()[-1])
+                response_time = float(metrics[44].split()[-1])
+                p50_res_time = float(metrics[47].split()[-1])
+                p90_res_time = float(metrics[50].split()[-1])
+                request_density = float(metrics[53].split()[-1])
 
-                num_of_req = request_count if request_count < 10 else 10
-                for i in range(int(num_of_req)):
-                    response_times.append(float(metrics[51+(i*3)].split()[-1]))
-            
         pod_info = {
-            "req_count": request_count, 
-            "request_density": request_density,
-            "avg_response_time": avg_response_time,
-            "response_times": response_times,
+            "req_count": request_count,
+            "res_time": response_time, 
+            "p50_res_time": p50_res_time, 
+            "p90_res_time": p90_res_time,
+            "req_density": request_density
         }
         pod_instances[pod_name] = pod_info
 
@@ -127,3 +128,4 @@ def collect_metrics():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8180)
+    
