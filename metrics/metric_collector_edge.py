@@ -1,9 +1,7 @@
 import json
 import logging
-import math
 import os
 import sys
-from collections import defaultdict
 
 from flask import Flask, Response, request
 from kubernetes import client, config
@@ -23,7 +21,6 @@ logging.basicConfig(
 config.load_kube_config()
 api = client.CustomObjectsApi()
 core_v1 = client.CoreV1Api()
-pod_cpu_map = defaultdict(lambda : [])
 
 def find_ready_pod_ips(label):
     """
@@ -44,53 +41,7 @@ def find_ready_pod_ips(label):
         raise exc
     return pod_ips
 
-def read_deployment(label):
-    """
-    Read the resource usage (CPU, Memory etc.) of deployment.
-    """
-    try:
-        resource = api.list_namespaced_custom_object(
-            group="metrics.k8s.io",
-            version="v1beta1",
-            namespace="autoscaler",
-            plural="pods",
-            label_selector=label
-        )
-    except client.ApiException as exc:
-        if exc.status == 404:
-            return None
-        raise exc
 
-    pods = {}
-    for pod in resource["items"]:
-        name = pod['metadata']['name']
-        if len(pod['containers']) == 0:
-            continue
-        cpu = pod['containers'][0]["usage"]["cpu"]
-        mem = pod['containers'][0]["usage"]["memory"]
-        
-        if "n" in cpu:
-            cpu_val = float(cpu.split("n")[0]) / 1000000
-        elif "m" in cpu:
-            cpu_val = float(cpu.split("m")[0])
-        else:
-            cpu_val = 0.0
-
-        n = len(pod_cpu_map[name])
-        if n == 10: 
-            pod_cpu_map[name].pop(0)
-        pod_cpu_map[name].append(cpu_val)
-
-        p10_cpu = sum(map(float, pod_cpu_map[name])) * 0.1
-        p50_cpu = sum(map(float, pod_cpu_map[name])) * 0.5
-        p90_cpu = sum(map(float, pod_cpu_map[name])) * 0.9
-
-        pods[name] = {
-            'cpu': cpu_val, 'p10_cpu': p10_cpu, 'p50_cpu': p50_cpu, 'p90_cpu': p90_cpu
-        }
-
-    return pods
-    
 @app.route("/metrics", methods=["POST"])
 def collect_metrics():
     """
@@ -125,7 +76,6 @@ def collect_metrics():
     
     label = f"app={app_type}-{node}"
     pod_ips = find_ready_pod_ips(label)
-    pod_resource = read_deployment(label)
 
     try:
         resource = api.list_namespaced_custom_object(
@@ -162,17 +112,6 @@ def collect_metrics():
         p50_all_res_times = 0
         p90_all_res_times = 0
 
-        if pod_name in pod_resource:
-            cpu = pod_resource[pod_name]["cpu"]
-            p10_cpu = pod_resource[pod_name]["p10_cpu"]
-            p50_cpu = pod_resource[pod_name]["p50_cpu"]
-            p90_cpu = pod_resource[pod_name]["p90_cpu"]
-        else:
-            cpu = 0
-            p10_cpu = 0
-            p50_cpu = 0
-            p90_cpu = 0
-
         with os.popen(f"kubectl exec -n autoscaler -it {pod_name} -- curl {pod_ip}:{port}/metrics") as f:
             metrics = f.readlines()
             if len(metrics) > 58:
@@ -199,11 +138,7 @@ def collect_metrics():
             "p50_req_density": p50_req_density, 
             "p90_req_density": p90_req_density,
             "p50_all_res_times": p50_all_res_times, 
-            "p90_all_res_times": p90_all_res_times,
-            "cpu": cpu,
-            "p10_cpu": p10_cpu,
-            "p50_cpu": p50_cpu,
-            "p90_cpu": p90_cpu
+            "p90_all_res_times": p90_all_res_times
         }
         pod_instances[pod_name] = pod_info
 

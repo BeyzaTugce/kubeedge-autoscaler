@@ -1,0 +1,14 @@
+[Unit]
+Description=Resource monitoring service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/modules/metrics/
+ExecStart=/home/ubuntu/.local/bin/gunicorn -b 0.0.0.0:8380 -w 1 resource_util:app
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

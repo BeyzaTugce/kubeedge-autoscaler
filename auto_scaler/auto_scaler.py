@@ -8,7 +8,6 @@ import math
 import sys
 from collections import defaultdict
 
-import numpy as np
 import requests
 from kubernetes import client, config
 
@@ -21,10 +20,10 @@ class AutoScaler:
 
     # Docker images for application types
     YOLOv5_IMAGE = "byz96/kubeedge-yolov5:v5"
-    MOBILENET_IMAGE = "byz96/serverless-mobilenet:v5"
-    SQUEEZENET_IMAGE = "byz96/serverless-squeezenet:v5"
-    SHUFFLENET_IMAGE = "byz96/serverless-shufflenet:v5" 
-    BINARYALERT_IMAGE = "byz96/serverless-binaryalert:v5"
+    MOBILENET_IMAGE = "byz96/serverless-mobilenet:v5.2"
+    SQUEEZENET_IMAGE = "byz96/serverless-squeezenet:v5.2"
+    SHUFFLENET_IMAGE = "byz96/serverless-shufflenet:v5.2" 
+    BINARYALERT_IMAGE = "byz96/serverless-binaryalert:v5.2"
 
     NODE_IP_MAP = {
         "edge1": "138.246.237.7",
@@ -32,6 +31,9 @@ class AutoScaler:
         "edge3": "138.246.237.5"
     }
     MASTER_IP = "138.246.236.8"
+    MIN_SCALE = 1
+    MAX_SCALE = 10
+    TIME_LIMIT = 5
 
     logging.basicConfig(
         level=logging.INFO,
@@ -49,6 +51,10 @@ class AutoScaler:
         self.core_v1 = client.CoreV1Api()
         self.apps_v1 = client.AppsV1Api()
 
+        self.min_scale = self.MIN_SCALE
+        self.max_scale = self.MAX_SCALE
+        self.time_limit = self.TIME_LIMIT
+
         self.load_avg_thres = 1.85
         self.available_mem = 20.00
         self.pod_cpu_map = defaultdict(lambda : [])
@@ -56,6 +62,7 @@ class AutoScaler:
 
         self.ip = self.NODE_IP_MAP[node]
         self.master_ip = self.MASTER_IP
+
         self.node = node
         self.app_type = app
         self.app = "-".join((app, node))
@@ -78,10 +85,6 @@ class AutoScaler:
             self.nodeport = 30200 + int(node[-1])
             self.name = "-".join(("squeezenet-deployment", node))
             self.service = "-".join(("squeezenet-lb", node))
-            self.upper_thres_cpu = 0.80
-            self.lower_thres_cpu = 0.40
-            self.upper_thres_res = 0.50
-            self.lower_thres_res = 0.10
         elif app == "shufflenet":
             self.image = self.SHUFFLENET_IMAGE
             self.port = 8080
@@ -96,6 +99,7 @@ class AutoScaler:
             self.service = "-".join(("binaryalert-lb", node))
 
         self.scale = self.__set_scale()
+        #self.data = pd.DataFrame(columns=['avg_res_time', 'avg_cpu', 'pod_name'])
 
     def watch_and_scale(self):
         """
@@ -108,26 +112,60 @@ class AutoScaler:
 
         #pod_resources = self.read_deployment()
         pod_metrics = self.__get_metrics()
-        logging.info(f"Pod metrics: {pod_metrics}")
-        for pod_name, app_metric in pod_metrics.items():
-            #or pod_resources[pod_name]["cpu"] > pod_resources[pod_name]["p90_cpu"]
-            #or pod_resources[pod_name]["mem"] > pod_resources[pod_name]["p90_mem"])
-            if  app_metric["res_time"] > app_metric["p90_res_time"] \
-                and load_avg < self.load_avg_thres \
-                and available_mem > self.available_mem:
-                self.__init_container()
-                return
-            #pod_resources[pod_name]["cpu"] < pod_resources[pod_name]["p50_cpu"]
-            if  app_metric["res_time"] < app_metric["p50_res_time"]:
-                self.__terminate_container()
-                return
+        if pod_metrics is None:
+            return
+        
+        pod_num = len(pod_metrics)
+        if pod_num == 0:
+            return
+
+        res_time = 0
+        p10_res_time = 0
+        p50_res_time = 0
+        p90_res_time = 0
+        cpu = 0
+        p10_cpu = 0
+        p50_cpu = 0
+
+        for _, app_metric in pod_metrics.items():
+            res_time += app_metric["res_time"]
+            p10_res_time += app_metric["p10_res_time"]
+            p50_res_time += app_metric["p50_res_time"]
+            p90_res_time += app_metric["p90_res_time"]
+            cpu += app_metric["cpu"]
+            p10_cpu += app_metric["p10_cpu"]
+            p50_cpu += app_metric["p90_cpu"]
+
+        res_time_avg = res_time / pod_num
+        p10_res_time_avg = p10_res_time / pod_num
+        p50_res_time_avg = p50_res_time / pod_num
+        p90_res_time_avg = p90_res_time / pod_num
+        cpu_avg = cpu / pod_num
+        p10_cpu_avg = p10_cpu / pod_num
+        p50_cpu_avg = p50_cpu / pod_num
+
+        if p50_res_time_avg > self.time_limit:
+            logging.info(f"Avg response time limit exceeded: {pod_metrics}")
+            self.__init_container()
+        elif res_time_avg > p90_res_time_avg and cpu_avg > p50_cpu_avg \
+            and load_avg < self.load_avg_thres and available_mem > self.available_mem \
+            and self.scale < self.max_scale:
+            logging.info(f"Deployment metrics: {pod_metrics}")
+            self.__init_container()
+        elif res_time_avg < p10_res_time_avg and cpu_avg < p10_cpu_avg and self.scale > self.min_scale:
+            logging.info(f"Deployment metrics: {pod_metrics}")
+            self.__terminate_container()
 
 
     def __get_metrics(self):
         """Collect metrics from the monitoring service running in the master node"""
-        req = json.dumps({"node": self.node, "app": self.app_type})
-        response = requests.post(f"http://{self.master_ip}:8180/metrics", data=req)
-        metrics = json.loads(response.text)
+        try:
+            req = json.dumps({"node": self.node, "app": self.app_type})
+            response = requests.post(f"http://{self.master_ip}:8180/metrics", data=req)
+            metrics = json.loads(response.text)
+        except Exception as exc:
+            logging.error("Error while reading metrics of %s - %s", self.node, self.app_type)
+            return        
 
         return metrics["pod_instances"]
 
@@ -143,16 +181,13 @@ class AutoScaler:
     def __init_container(self):
         """Initialize new container"""
         if self.scale == 0:
-            self.create_deployment_and_service(1)
+            self.create_deployment_and_service()
         else:
             self.update_deployment(self.scale + 1)
 
     def __terminate_container(self):
         """Terminate one container"""
-        if self.scale == 1:
-            self.delete_deployment()
-        elif self.scale > 1:
-            self.update_deployment(self.scale - 1)
+        self.update_deployment(self.scale - 1)
 
 
     ################## CRUD Operations for the given deployment object ##################
@@ -167,6 +202,12 @@ class AutoScaler:
             image=self.image,
             image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(name="http", container_port=self.port)],
+            resources=client.V1ResourceRequirements(
+                limits={
+                    "cpu": "1000m",
+                    "memory": "512Mi"
+                },
+            ),
         )
         # Create and configure a spec section
         template = client.V1PodTemplateSpec(
@@ -239,14 +280,12 @@ class AutoScaler:
             )
         except Exception as exc:
             logging.error(
-                "Error while creating deployment object \
-                %s with the given specifications", self.name
-            )
-            #raise exc
+                "Error while creating deployment object %s with the given specifications", self.name)
+            raise exc
         # Create deployment
         try:
             self.apps_v1.create_namespaced_deployment(
-                body=deployment, namespace="default"
+                body=deployment, namespace="autoscaler"
             )
             self.scale = replica
             logging.info(
@@ -256,7 +295,6 @@ class AutoScaler:
             logging.error(
                 "Error while creating namaspaced deployment %s", self.name
             )
-            #raise exc
         # Create service object
         try:
             service = self.create_service_object()
@@ -264,22 +302,18 @@ class AutoScaler:
                 "Service object %s has been successfully created.", self.service
             )
         except Exception as exc:
-            logging.error(
-                "Error while creating service object \
-                %s with the given specifications", self.service
-            )
-            #raise exc
+            logging.warning(
+                "Service object %s already exists", self.service)
         # Create service
         try:
-            self.core_v1.create_namespaced_service(namespace="default", body=service)
+            self.core_v1.create_namespaced_service(namespace="autoscaler", body=service)
             logging.info(
                 "Namespaced service %s has been successfully created.", self.name
             )
         except Exception as exc:
             logging.error(
-                "Error while creating namaspaced service %s", self.name
+                "Namaspaced service %s exists", self.name
             )
-            #raise exc
 
     def read_deployment(self):
         """
@@ -293,7 +327,7 @@ class AutoScaler:
             resource = self.api.list_namespaced_custom_object(
                 group="metrics.k8s.io",
                 version="v1beta1",
-                namespace="default",
+                namespace="autoscaler",
                 plural="pods",
                 label_selector=label
             )
@@ -307,6 +341,8 @@ class AutoScaler:
         pods = {}
         for pod in resource["items"]:
             name = pod['metadata']['name']
+            if len(pod['containers']) == 0:
+                continue
             cpu = pod['containers'][0]["usage"]["cpu"]
             mem = pod['containers'][0]["usage"]["memory"]
             
@@ -317,23 +353,20 @@ class AutoScaler:
             else:
                 cpu_val = 0.0
 
+            #p90_cpu = sorted(map(float, self.pod_cpu_map[name]))[int(math.ceil(n*0.9)) - 1]
+
             n = len(self.pod_cpu_map[name])
             if n == 10: 
-                self.pod_cpu_map.pop(0)
-                #self.pod_mem_map.pop(0)
+                self.pod_cpu_map[name].pop(0)
             self.pod_cpu_map[name].append(cpu_val)
-            #self.pod_mem_map[name].append(mem)
 
-            p50_cpu = sorted(map(float, self.pod_cpu_map[name]))[int(math.ceil(n*0.5)) - 1]
-            p90_cpu = sorted(map(float, self.pod_cpu_map[name]))[int(math.ceil(n*0.9)) - 1]
-            #p50_mem = sum(map(float, self.pod_cpu_map[name])) * 0.5
-            #p90_mem = sum(map(float, self.pod_cpu_map[name])) * 0.9
+            p10_cpu = sum(map(float, self.pod_cpu_map[name])) * 0.1
+            p50_cpu = sum(map(float, self.pod_cpu_map[name])) * 0.5
+            p90_cpu = sum(map(float, self.pod_cpu_map[name])) * 0.9
 
             pods[name] = {
-                'cpu': cpu_val ,'p50_cpu': p50_cpu, 'p90_cpu': p90_cpu
+                'cpu': cpu_val , 'p10_cpu': p10_cpu, 'p50_cpu': p50_cpu, 'p90_cpu': p90_cpu
             }
-            #'mem': mem, 'p50_mem': p50_mem, 'p90_mem': p90_mem
-
         return pods
 
     def update_deployment(self, replica):
@@ -341,24 +374,22 @@ class AutoScaler:
         Scale the deployment with a given number of replicas in the given namespace.
         """
         # Create deployment object
+        """
         try:
             deployment = self.create_deployment_object(replica)
-            logging.info(
-                "Deployment object %s has been successfully \
-                created with the new replica number.", self.name
-            )
+            logging.info("Deployment object %s has been successfully created with the new replica number.", self.name)
         except Exception as exc:
             logging.error("Error while creating namaspaced deployment %s", self.name)
             raise exc
-
+        """
         # Update container image
         up_down = "up" if self.scale < replica else "down"
-        deployment.spec.replicas = replica
-
+        #deployment.spec.replicas = replica
+        
         # patch the deployment
         try:
-            self.apps_v1.patch_namespaced_deployment(
-                name=self.name, namespace="default", body=deployment
+            self.apps_v1.patch_namespaced_deployment_scale(
+                name=self.name, namespace="autoscaler", body={'spec': {'replicas': replica}}
             )
             logging.info("Deployment object %s has been successfully scaled %s.", self.name, up_down)
         except Exception as exc:
@@ -379,25 +410,30 @@ class AutoScaler:
         try:
             self.apps_v1.delete_namespaced_deployment(
                 name=self.name,
-                namespace="default",
+                namespace="autoscaler",
                 body=client.V1DeleteOptions(
-                    propagation_policy="Foreground",
+                    propagation_policy="Background",
                     grace_period_seconds=3
                 ),
             )
+            self.scale -= 1
             logging.info("Deployment object %s has been successfully deleted.", self.name)
+        except Exception as exc:
+            logging.error("Error while deleting deployment %s", self.name)
+            #raise exc
+        try:
             self.core_v1.delete_namespaced_service(
                 name=self.service,
-                namespace="default",
+                namespace="autoscaler",
                 body=client.V1DeleteOptions(
-                    propagation_policy="Foreground",
+                    propagation_policy="Background",
                     grace_period_seconds=3
                 ),
             )
             logging.info("Service object %s has been successfully deleted.", self.service)
         except Exception as exc:
-            logging.error("Error while deleting deployment %s and service %s", self.name, self.service)
-            raise exc
+            logging.error("Error while deleting service %s", self.service)
+            #raise exc
 
     ######################## END ########################
 
@@ -408,7 +444,7 @@ class AutoScaler:
         try:
             resource = self.apps_v1.read_namespaced_deployment_scale(
                 name=self.name,
-                namespace="default"
+                namespace="autoscaler"
             )
             logging.info("Replica number of deployment %s has been successfully read.", self.name)
         except client.ApiException as exc:

@@ -57,6 +57,7 @@ def forward_request():
     msg = json.loads(request_json)
     node = msg["node"]
     app_type = msg["app"]
+    request_start = float(msg["request_start"])
     
     hostname = socket.gethostname()
     host_ip = edge_ips[hostname]
@@ -65,7 +66,8 @@ def forward_request():
         find_service_ports(hostname)
         port = services[app_type]
         try:
-            res_init = requests.post(f"http://{host_ip}:{port}/init")
+            req = json.dumps({"request_start": request_start})
+            res_init = requests.post(f"http://{host_ip}:{port}/init", data=req)
             res = requests.post(f"http://{host_ip}:{port}/run")
             logging.info("Local execution of %s in %s.", app_type, node)
         except client.ApiException as exc:
@@ -77,7 +79,7 @@ def forward_request():
         else:
             next_hop_ip = edge_ips[next_hops[hostname]]
         try:
-            req = json.dumps({"node": node, "app": app_type})
+            req = json.dumps({"node": node, "app": app_type, "request_start": request_start})
             res = requests.post(f"http://{next_hop_ip}:{proxy_service_port}/proxy", data=req)
             logging.info("Forward the request of %s to %s.", app_type, node)
         except client.ApiException as exc:

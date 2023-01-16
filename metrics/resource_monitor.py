@@ -7,7 +7,7 @@ from flask import Flask, Response
 app = Flask(__name__)
     
 @app.route("/load", methods=["GET"])
-def forward_resource_util():
+def monitor_resource_utils():
     """
     Flas server listening on port 8380 for the resource utilization of edge node
     
