@@ -11,4 +11,4 @@ if __name__ == '__main__':
     
     while True:
         [auto_scaler.watch_and_scale() for auto_scaler in auto_scaler_list] 
-        sleep(10)
+        sleep(15)

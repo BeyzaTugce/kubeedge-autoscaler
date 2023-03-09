@@ -58,10 +58,7 @@ def collect_metrics():
     name = None
     port = None
 
-    if app_type == "yolov5":
-        port = 5000
-        name = "-".join(("yolov5-deployment", node))
-    elif app_type == "mobilenet":
+    if app_type == "mobilenet":
         port = 8080
         name = "-".join(("mobilenet-deployment", node))
     elif app_type == "squeezenet":
@@ -88,7 +85,12 @@ def collect_metrics():
         logging.info("Deployment %s has been successfully read.", name)
     except client.ApiException as exc:
         if exc.status == 404:
-            return None
+            logging.info("Deployment %s has not been found.", name)
+            res = json.dumps({
+                "pod_number": 0,
+                "pod_instances": {}
+            })
+            return Response(response=res, status=404)
         logging.error("Error while reading deployment %s", name)
         raise exc
 
@@ -105,10 +107,6 @@ def collect_metrics():
         p10_res_time = 0
         p50_res_time = 0
         p90_res_time = 0
-        request_density = 0
-        p10_req_density = 0
-        p50_req_density = 0
-        p90_req_density = 0
         p50_all_res_times = 0
         p90_all_res_times = 0
 
@@ -120,10 +118,10 @@ def collect_metrics():
                 p10_res_time = float(metrics[47].split()[-1])
                 p50_res_time = float(metrics[50].split()[-1])
                 p90_res_time = float(metrics[53].split()[-1])
-                request_density = float(metrics[56].split()[-1])
-                p10_req_density = float(metrics[59].split()[-1])
-                p50_req_density = float(metrics[62].split()[-1])
-                p90_req_density = float(metrics[65].split()[-1])
+                #request_density = float(metrics[56].split()[-1])
+                #p10_req_density = float(metrics[59].split()[-1])
+                #p50_req_density = float(metrics[62].split()[-1])
+                #p90_req_density = float(metrics[65].split()[-1])
                 p50_all_res_times = float(metrics[68].split()[-1])
                 p90_all_res_times = float(metrics[71].split()[-1])
 
@@ -133,10 +131,6 @@ def collect_metrics():
             "p10_res_time": p10_res_time,
             "p50_res_time": p50_res_time, 
             "p90_res_time": p90_res_time,
-            "req_density": request_density,
-            "p10_req_density": p10_req_density,
-            "p50_req_density": p50_req_density, 
-            "p90_req_density": p90_req_density,
             "p50_all_res_times": p50_all_res_times, 
             "p90_all_res_times": p90_all_res_times
         }

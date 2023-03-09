@@ -5,12 +5,15 @@ where some applications deployed to each edge node
 import json
 import logging
 import math
+import os
 import sys
 from collections import defaultdict
 
 import requests
+from dotenv import load_dotenv
 from kubernetes import client, config
 
+load_dotenv()
 
 class AutoScaler:
     """
@@ -19,20 +22,25 @@ class AutoScaler:
     """
 
     # Docker images for application types
-    YOLOv5_IMAGE = "byz96/kubeedge-yolov5:v5"
     MOBILENET_IMAGE = "byz96/serverless-mobilenet:v5.2"
     SQUEEZENET_IMAGE = "byz96/serverless-squeezenet:v5.2"
     SHUFFLENET_IMAGE = "byz96/serverless-shufflenet:v5.2" 
     BINARYALERT_IMAGE = "byz96/serverless-binaryalert:v5.2"
 
     NODE_IP_MAP = {
-        "edge1": "138.246.237.7",
-        "edge2": "138.246.236.237",
-        "edge3": "138.246.237.5"
+        "edge1": os.environ["EDGE-1"],
+        "edge2": os.environ["EDGE-2"],
+        "edge3": os.environ["EDGE-3"]
     }
-    MASTER_IP = "138.246.236.8"
+    TARGET_CPU = {
+        "shufflenet": 125,
+        "mobilenet": 250,
+        "squeezenet": 125,
+        "binaryalert": 45
+    }
+    MASTER_IP = os.environ["MASTER"]
     MIN_SCALE = 1
-    MAX_SCALE = 10
+    MAX_SCALE = 30
     TIME_LIMIT = 5
 
     logging.basicConfig(
@@ -55,8 +63,9 @@ class AutoScaler:
         self.max_scale = self.MAX_SCALE
         self.time_limit = self.TIME_LIMIT
 
-        self.load_avg_thres = 1.85
-        self.available_mem = 20.00
+        self.node_cpu_thres = 90.00
+        self.node_mem_thres = 30.00
+        self.desired_cpu_avg = self.TARGET_CPU[app]
         self.pod_cpu_map = defaultdict(lambda : [])
         self.pod_mem_map = defaultdict(lambda : [])
 
@@ -67,13 +76,7 @@ class AutoScaler:
         self.app_type = app
         self.app = "-".join((app, node))
 
-        if app == "yolov5":
-            self.image = self.YOLOv5_IMAGE
-            self.port = 5000
-            self.nodeport = 30000 + int(node[-1])
-            self.name = "-".join(("yolov5-deployment", node))
-            self.service = "-".join(("yolov5-lb", node))
-        elif app == "mobilenet":
+        if app == "mobilenet":
             self.image = self.MOBILENET_IMAGE
             self.port = 8080
             self.nodeport = 30100 + int(node[-1])
@@ -99,18 +102,16 @@ class AutoScaler:
             self.service = "-".join(("binaryalert-lb", node))
 
         self.scale = self.__set_scale()
-        #self.data = pd.DataFrame(columns=['avg_res_time', 'avg_cpu', 'pod_name'])
 
     def watch_and_scale(self):
         """
         Watch the pods and scale up or down according to available resources
         """
-        load_avg, available_mem = self.__get_node_resource()
-        if self.scale == 0 and load_avg < self.load_avg_thres and available_mem > self.available_mem:
+        cpu_util, available_mem = self.__get_node_resource()
+        if self.scale == 0 and cpu_util < self.node_cpu_thres and available_mem > self.node_mem_thres:
             self.__init_container()
             return
 
-        #pod_resources = self.read_deployment()
         pod_metrics = self.__get_metrics()
         if pod_metrics is None:
             return
@@ -121,39 +122,29 @@ class AutoScaler:
 
         res_time = 0
         p10_res_time = 0
-        p50_res_time = 0
+        #p50_res_time = 0
         p90_res_time = 0
-        cpu = 0
-        p10_cpu = 0
-        p50_cpu = 0
+        pod_cpu_total = 0
 
         for _, app_metric in pod_metrics.items():
             res_time += app_metric["res_time"]
             p10_res_time += app_metric["p10_res_time"]
-            p50_res_time += app_metric["p50_res_time"]
+            #p50_res_time += app_metric["p50_res_time"]
             p90_res_time += app_metric["p90_res_time"]
-            cpu += app_metric["cpu"]
-            p10_cpu += app_metric["p10_cpu"]
-            p50_cpu += app_metric["p90_cpu"]
+            pod_cpu_total += app_metric["cpu"]
 
         res_time_avg = res_time / pod_num
         p10_res_time_avg = p10_res_time / pod_num
-        p50_res_time_avg = p50_res_time / pod_num
+        #p50_res_time_avg = p50_res_time / pod_num
         p90_res_time_avg = p90_res_time / pod_num
-        cpu_avg = cpu / pod_num
-        p10_cpu_avg = p10_cpu / pod_num
-        p50_cpu_avg = p50_cpu / pod_num
+        pod_cpu_avg = pod_cpu_total / pod_num
 
-        if p50_res_time_avg > self.time_limit:
-            logging.info(f"Avg response time limit exceeded: {pod_metrics}")
+        desired_replicas = math.ceil(pod_num * ( pod_cpu_avg / self.desired_cpu_avg ))
+
+        if (res_time_avg > p90_res_time_avg or desired_replicas > self.scale) \
+            and cpu_util < self.node_cpu_thres and available_mem > self.node_mem_thres:
             self.__init_container()
-        elif res_time_avg > p90_res_time_avg and cpu_avg > p50_cpu_avg \
-            and load_avg < self.load_avg_thres and available_mem > self.available_mem \
-            and self.scale < self.max_scale:
-            logging.info(f"Deployment metrics: {pod_metrics}")
-            self.__init_container()
-        elif res_time_avg < p10_res_time_avg and cpu_avg < p10_cpu_avg and self.scale > self.min_scale:
-            logging.info(f"Deployment metrics: {pod_metrics}")
+        elif res_time_avg < p10_res_time_avg or desired_replicas < self.scale:
             self.__terminate_container()
 
 
@@ -173,21 +164,26 @@ class AutoScaler:
         """Monitor resource usage from the service running in each edge node"""
         response = requests.get(f"http://{self.ip}:8380/load")
         resource = json.loads(response.text)
-        load_avg = resource["load_avg_5min"]
+        cpu_util = resource["cpu_util"]
         available_mem = resource["available_mem"]
 
-        return load_avg, available_mem
+        return cpu_util, available_mem
 
     def __init_container(self):
         """Initialize new container"""
-        if self.scale == 0:
+        if self.scale == self.max_scale:
+            logging.info("Max number of pods have already been created")
+        elif self.scale == 0:
             self.create_deployment_and_service()
         else:
             self.update_deployment(self.scale + 1)
 
     def __terminate_container(self):
         """Terminate one container"""
-        self.update_deployment(self.scale - 1)
+        if self.scale == self.min_scale:
+            logging.info("Min number of pods are running")
+        else:
+            self.update_deployment(self.scale - 1)
 
 
     ################## CRUD Operations for the given deployment object ##################
@@ -203,10 +199,10 @@ class AutoScaler:
             image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(name="http", container_port=self.port)],
             resources=client.V1ResourceRequirements(
-                limits={
-                    "cpu": "1000m",
-                    "memory": "512Mi"
-                },
+                requests={
+                    "cpu": "200m"
+                    #"memory": "512Mi"
+                }
             ),
         )
         # Create and configure a spec section

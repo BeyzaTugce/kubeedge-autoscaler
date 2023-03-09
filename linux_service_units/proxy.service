@@ -3,9 +3,9 @@ Description=Proxy service for request forwarding
 After=network.target
 
 [Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/modules/
-ExecStart=/home/ubuntu/.local/bin/gunicorn -b 0.0.0.0:8280 -w 1 proxy:app
+User=faas_share_caps
+WorkingDirectory=/home/faas_share_caps/modules/
+ExecStart=/usr/local/bin/gunicorn -b 0.0.0.0:8280 -w 1 proxy:app
 Restart=always
 StartLimitInterval=0
 RestartSec=10

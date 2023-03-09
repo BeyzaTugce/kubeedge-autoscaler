@@ -1,11 +1,15 @@
 import json
 import logging
+import os
 import socket
 import sys
 
 import requests
+from dotenv import load_dotenv
 from flask import Flask, Response, request
 from kubernetes import client, config
+
+load_dotenv()
 
 # Initialize the Flask application
 app = Flask(__name__)
@@ -26,9 +30,9 @@ proxy_service_port = 8280
 services = {}
 
 edge_ips = {
-    "edge1" : "138.246.237.7",
-    "edge2" : "138.246.236.237",
-    "edge3" : "138.246.237.5"
+    "edge1": os.environ["EDGE-1"],
+    "edge2": os.environ["EDGE-2"],
+    "edge3": os.environ["EDGE-3"]
 }
 
 next_hops = {

@@ -1,13 +1,12 @@
-# /etc/systemd/system/multi-user.target.wants/
+# /etc/systemd/system/multi-user.target.wants/ and /lib/systemd/system
 [Unit]
 Description=Prometheus metric collector
 After=network.target
 
 [Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/modules/metrics/
-ExecStart=/home/ubuntu/.local/bin/gunicorn -b 0.0.0.0:8180 -w 1 metric_collecto$
-#ExecStart=/bin/bash -c 'metric_collector.py'
+User=faas_share_caps
+WorkingDirectory=/home/faas_share_caps/modules/metrics/
+ExecStart=/usr/local/bin/gunicorn -b 0.0.0.0:8180 -w 1 metric_collector:app
 Restart=always
 StartLimitInterval=0
 RestartSec=10
